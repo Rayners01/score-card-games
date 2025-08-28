@@ -237,7 +237,7 @@ export default function Home() {
     const { primary } = bgClasses[winnerIndex] || bgClasses[0];
 
     return (
-      <div className={`w-full h-screen flex flex-col items-center justify-center ${primary} text-white`}>
+      <div className={`w-full flex flex-col items-center justify-center ${primary} text-white`} style={{ height: '100dvh' }}>
         <div className="text-[12vw] sm:text-[8vw] font-bold mb-4">
           👑 {winner.name} 👑
         </div>
