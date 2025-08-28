@@ -156,6 +156,7 @@ export default function Home() {
       savePlayersToFirebase(updatedPlayers);
       setScoreInput("");
     }
+    setSelectedPlayerId(null)
   };
 
   const handleSaveEdit = () => {

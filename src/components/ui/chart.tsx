@@ -44,7 +44,7 @@ export const ChartDialog: React.FC<ChartDialogProps> = ({ open, onOpenChange, pl
           padding: 8
         }
       },
-      title: { display: true, text: 'Cumulative Player Scores Over Rounds' }
+      title: { display: true, text: 'Scores by round' }
     },
     scales: {
       y: {
