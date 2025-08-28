@@ -1,7 +1,7 @@
 'use client';
 
 import { Dialog } from './dialog';
-import { Player } from '@/types'; // optional, if you have a Player type file
+import { Player } from '@/lib/types'; // optional, if you have a Player type file
 import { Line } from 'react-chartjs-2';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend } from 'chart.js';
 

@@ -4,10 +4,13 @@ import { useState, useEffect } from 'react';
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Player, Colour, bgClasses } from "@/types";
+import { Player, Colour, bgClasses } from "@/lib/types";
 import { ChartDialog } from "@/components/ui/chart";
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, onDisconnect, get, runTransaction } from 'firebase/database';
+import { generateAlphanumeric, minRounds, getScore, generateGameCode, isWinner, getWinner } from '@/lib/util';
+import { Toggle } from '@/components/ui/toggle';
+import FullScreenConfetti from '@/components/ui/confetti'; 
 
 const maxPlayers = bgClasses.length;
 
@@ -28,6 +31,12 @@ export default function Home() {
   const [isHost, setIsHost] = useState(false);
   const [joinCode, setJoinCode] = useState('');
 
+  const [hasPointsLimit, setHasPointsLimit] = useState(false);
+  const [pointsLimit, setPointsLimit] = useState<number | null>(null);
+  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [showWinnerScreen, setShowWinnerScreen] = useState(false);
+
+
   // ===== UI state =====
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
@@ -43,60 +52,93 @@ export default function Home() {
 
   // ====== Firebase Real-time Sync & Host Election ======
   useEffect(() => {
-    if (!gameCode) return;
+  if (!gameCode) return;
 
-    const gameRef = ref(db, `games/${gameCode}`);
-    const clientsRef = ref(db, `games/${gameCode}/clients`);
+  const gameRef = ref(db, `games/${gameCode}`);
+  const clientsRef = ref(db, `games/${gameCode}/clients`);
 
-    // Track client presence
-    const connectedRef = ref(db, ".info/connected");
-    const clientRef = ref(db, `games/${gameCode}/clients/${clientId}`);
+  // Track client presence
+  const connectedRef = ref(db, ".info/connected");
+  const clientRef = ref(db, `games/${gameCode}/clients/${clientId}`);
 
-    const unsubConnected = onValue(connectedRef, snap => {
-      if (snap.val() === true) {
-        // Mark self online
-        set(clientRef, { online: true });
-        onDisconnect(clientRef).set({ online: false });
+  const unsubConnected = onValue(connectedRef, snap => {
+    if (snap.val() === true) {
+      // Mark self online
+      set(clientRef, { online: true });
+      onDisconnect(clientRef).set({ online: false });
+    }
+  });
+
+  // Listen for game updates
+  const unsubGame = onValue(gameRef, async snapshot => {
+    const data = snapshot.val() || {};
+
+    // === Sync players ===
+    const gamePlayers: Player[] = data.players?.map((p: Player) => ({
+      ...p,
+      scores: p.scores || []
+    })) || [];
+    setPlayers(gamePlayers);
+
+    // === Sync points limit if present ===
+    if (typeof data.pointsLimit === 'number') {
+      setPointsLimit(data.pointsLimit);
+    } else {
+      setPointsLimit(null);
+    }
+
+    // === Winner detection logic ===
+    if (data.pointsLimit && gamePlayers.length > 0) {
+      const minRounds = Math.min(...gamePlayers.map(p => p.scores.length));
+
+      // Ensure all players have played the same number of rounds
+      const allPlayersReady = gamePlayers.every(p => p.scores.length === minRounds);
+
+      if (allPlayersReady) {
+        const scores = gamePlayers.map(p => ({
+          ...p,
+          score: getScore(p)
+        }));
+
+        const winner = scores.find(p => p.score >= data.pointsLimit);
+
+        if (winner) {
+          setShowWinnerScreen(true);
+        } else {
+          setShowWinnerScreen(false);
+        }
       }
-    });
+    }
 
-    // Listen for game updates
-    const unsubGame = onValue(gameRef, async snapshot => {
-      const data = snapshot.val() || {};
-      const gamePlayers: Player[] = data.players?.map((p: Player) => ({
-        ...p,
-        scores: p.scores || []
-      })) || [];
-      setPlayers(gamePlayers);
+    // === Host election logic ===
+    const hostId = data.hostId;
+    const clients = data.clients || {};
+    const hostOnline = hostId ? clients[hostId]?.online : false;
 
-      // Host election logic
-      const hostId = data.hostId;
-      const clients = data.clients || {};
-      const hostOnline = hostId ? clients[hostId]?.online : false;
+    if (!hostId || !hostOnline) {
+      // Attempt to claim host safely using transaction
+      const hostRef = ref(db, `games/${gameCode}/hostId`);
+      runTransaction(hostRef, current => {
+        if (!current || !clients[current]?.online) return clientId;
+        return current;
+      }).then(result => {
+        if (result.committed && result.snapshot.val() === clientId) {
+          setIsHost(true);
+        } else if (result.snapshot.val() !== clientId) {
+          setIsHost(false);
+        }
+      });
+    } else {
+      setIsHost(hostId === clientId);
+    }
+  });
 
-      if (!hostId || !hostOnline) {
-        // Attempt to claim host safely using transaction
-        const hostRef = ref(db, `games/${gameCode}/hostId`);
-        runTransaction(hostRef, current => {
-          if (!current || !clients[current]?.online) return clientId;
-          return current;
-        }).then(result => {
-          if (result.committed && result.snapshot.val() === clientId) {
-            setIsHost(true);
-          } else if (result.snapshot.val() !== clientId) {
-            setIsHost(false);
-          }
-        });
-      } else {
-        setIsHost(hostId === clientId);
-      }
-    });
+  return () => {
+    unsubGame();
+    unsubConnected();
+  };
+}, [gameCode]);
 
-    return () => {
-      unsubGame();
-      unsubConnected();
-    };
-  }, [gameCode]);
 
   const savePlayersToFirebase = (updatedPlayers: Player[]) => {
     if (!gameCode || !isHost) return;
@@ -105,16 +147,23 @@ export default function Home() {
   };
 
   // ====== Host / Join Game ======
-  const createGame = () => {
+  const startNewGame = () => {
     const code = generateGameCode();
     setGameCode(code);
     setIsHost(true);
     setPlayers([]);
     const gameRef = ref(db, `games/${code}`);
-    set(gameRef, { players: [], hostId: clientId, clients: { [clientId]: { online: true } } });
+    set(gameRef, {
+      players: [],
+      hostId: clientId,
+      clients: { [clientId]: { online: true } },
+      pointsLimit: hasPointsLimit ? pointsLimit : null,
+    });
     const clientRef = ref(db, `games/${code}/clients/${clientId}`);
     onDisconnect(clientRef).set({ online: false });
+    setShowSettingsDialog(false);
   };
+
 
   const joinGame = () => {
     if (!joinCode) return;
@@ -136,7 +185,7 @@ export default function Home() {
     const newPlayer: Player = {
       id: generateAlphanumeric(13),
       name: newPlayerName,
-      scores: []
+      scores: Array(minRounds(players)).fill(0)
     };
     const updatedPlayers = [...players, newPlayer];
     setPlayers(updatedPlayers);
@@ -146,7 +195,7 @@ export default function Home() {
   };
 
   const handleAddScore = () => {
-    if (!selectedPlayer) return;
+    if (!selectedPlayer || showWinnerScreen) return;
     const value = parseInt(scoreInput);
     if (!isNaN(value)) {
       const updatedPlayers = players.map(p =>
@@ -182,12 +231,30 @@ export default function Home() {
     setSelectedPlayerId(null);
   };
 
+  if (showWinnerScreen && pointsLimit) {
+    const winner = getWinner(players);
+    const winnerIndex = players.findIndex(p => p.id === winner.id);
+    const { primary } = bgClasses[winnerIndex] || bgClasses[0];
+
+    return (
+      <div className={`w-full h-screen flex flex-col items-center justify-center ${primary} text-white`}>
+        <div className="text-[12vw] sm:text-[8vw] font-bold mb-4">
+          👑 {winner.name} 👑
+        </div>
+        <div className="text-[10vw] sm:text-[6vw]">
+          {getScore(winner)} points
+        </div>
+        <FullScreenConfetti />
+      </div>
+    );
+  }
+
   // ====== Render ======
   return (
     <div className="w-full bg-emerald-400 overflow-hidden" style={{ height: '100dvh' }}>
       {!gameCode ? (
         <div className="flex flex-col items-center justify-center h-full gap-4">
-          <Button onClick={createGame}>Create Game</Button>
+          <Button onClick={() => setShowSettingsDialog(true)}>Create Game</Button>
           <Button onClick={() => setJoinDialogOpen(true)}>Join Game</Button>
         </div>
       ) : (
@@ -207,7 +274,7 @@ export default function Home() {
                     onClick={() => handleClickPlayer(p)}
                   >
                     <div className="text-[6vw] sm:text-[5vw] md:text-[4vw] text-white font-bold mb-1 truncate text-center">
-                      {p.name}
+                      {p.name + (isWinner(p, players) ? " 👑" : "")}
                     </div>
                     <div className="text-[10vw] sm:text-[8vw] md:text-[6vw] text-gray-100 font-bold text-center">
                       {getScore(p)}
@@ -324,30 +391,37 @@ export default function Home() {
           <Button onClick={joinGame} className="w-full mt-2">Join</Button>
         </>
       </Dialog>
+
+      <Dialog open={showSettingsDialog} onOpenChange={() => setShowSettingsDialog(false)}>
+        <>
+          <h2 className="text-lg font-bold mb-2">Game Settings</h2>
+
+          <div className="flex items-center gap-2 mb-3">
+            <Toggle checked={hasPointsLimit} onChange={setHasPointsLimit} label="Enable Score Target" />
+          </div>
+
+          <div className="mb-3">
+            <Input
+              type="number"
+              placeholder="Winning Score"
+              value={pointsLimit ?? ''}
+              onChange={e => setPointsLimit(e.target.value ? parseInt(e.target.value) : 0)}
+              className={`${hasPointsLimit ? '' : 'opacity-0 pointer-events-none'}`}
+            />
+          </div>
+
+          <Button
+            onClick={startNewGame}
+            disabled={hasPointsLimit && (!pointsLimit || pointsLimit <= 0)}
+            className="w-full"
+          >
+            Start Game
+          </Button>
+        </>
+      </Dialog>
+
     </div>
   );
 }
 
 // ===== Utility Functions =====
-function getScore(player: Player): number {
-  return (player.scores || []).reduce((sum, s) => sum + s, 0);
-}
-
-function randomBg(id: string): Colour {
-  const hash = id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return bgClasses[hash % bgClasses.length];
-}
-
-function generateAlphanumeric(n: number): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let res = '';
-  for (let i = 0; i < n; i++) res += chars[Math.floor(Math.random() * chars.length)];
-  return res;
-}
-
-function generateGameCode(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz';
-  let res = '';
-  for (let i = 0; i < 5; i++) res += chars[Math.floor(Math.random() * chars.length)];
-  return res;
-}
